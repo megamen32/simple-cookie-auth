@@ -1,0 +1,20 @@
+# Caddy 2 example. forward_auth lets the upstream decide whether the cookie is valid.
+# The error handler turns a 401 into the friendly login redirect.
+
+app.example.com {
+    handle_errors {
+        @unauthorized expression {http.error.status_code} == 401
+        redir @unauthorized https://auth.example.com/login?rd={http.request.scheme}://{http.request.host}{http.request.uri} 302
+    }
+
+    forward_auth 127.0.0.1:18991 {
+        uri /check
+        copy_headers X-Auth-User
+    }
+
+    reverse_proxy 127.0.0.1:9000
+}
+
+auth.example.com {
+    reverse_proxy 127.0.0.1:18991
+}

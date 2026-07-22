@@ -1,0 +1,23 @@
+[Unit]
+Description=Simple Cookie Auth
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/etc/simple-cookie-auth
+ExecStart=/usr/bin/python3 /usr/local/lib/simple-cookie-auth/simple_cookie_auth.py \
+    --host 127.0.0.1 --port 18991 \
+    --users /etc/simple-cookie-auth/users.htpasswd \
+    --secret /etc/simple-cookie-auth/secret \
+    --cookie-domain .example.com \
+    --default-redirect https://example.com/
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run
+
+[Install]
+WantedBy=multi-user.target
