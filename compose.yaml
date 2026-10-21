@@ -1,0 +1,26 @@
+services:
+  auth:
+    image: simple-cookie-auth:sss
+    build: .
+    container_name: simple-cookie-auth
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:18991:18991"
+    environment:
+      GPTADMIN_COOKIE_AUTH_HOST: 0.0.0.0
+      GPTADMIN_COOKIE_AUTH_PORT: "18991"
+      GPTADMIN_COOKIE_AUTH_HTPASSWD: /run/secrets/htpasswd
+      GPTADMIN_COOKIE_AUTH_SECRET_FILE: /run/secrets/cookie_secret
+      GPTADMIN_COOKIE_AUTH_DOMAIN: ${COOKIE_DOMAIN:?set COOKIE_DOMAIN}
+      GPTADMIN_COOKIE_AUTH_DEFAULT_REDIRECT: ${COOKIE_AUTH_DEFAULT_REDIRECT:?set COOKIE_AUTH_DEFAULT_REDIRECT}
+      GPTADMIN_COOKIE_AUTH_PASSKEYS_ENABLED: "1"
+      GPTADMIN_COOKIE_AUTH_PASSKEY_DB: /var/lib/gptadmin-cookie-auth/passkeys.sqlite3
+    volumes:
+      - ${COOKIE_AUTH_HTPASSWD:?set COOKIE_AUTH_HTPASSWD}:/run/secrets/htpasswd:ro
+      - ${COOKIE_AUTH_SECRET_FILE:?set COOKIE_AUTH_SECRET_FILE}:/run/secrets/cookie_secret:ro
+      - passkeys:/var/lib/gptadmin-cookie-auth
+
+volumes:
+  passkeys:
+    external: true
+    name: ${COOKIE_AUTH_PASSKEY_VOLUME:?set COOKIE_AUTH_PASSKEY_VOLUME}
