@@ -154,12 +154,18 @@ class AccessControlHttpTests(unittest.TestCase):
         self.assertEqual(403, status)
 
         previous = cookie_auth.ADMIN_ENABLED
+        previous_invites = cookie_auth.INVITE_SETUP_ENABLED
         cookie_auth.ADMIN_ENABLED = False
+        cookie_auth.INVITE_SETUP_ENABLED = False
         try:
             status, _, _ = self.request("GET", "/admin", {"Cookie": owner_cookie})
             self.assertEqual(403, status)
+            status, _, body = self.request("GET", "/invite#token=not-sent")
+            self.assertEqual(503, status)
+            self.assertNotIn("not-sent", body)
         finally:
             cookie_auth.ADMIN_ENABLED = previous
+            cookie_auth.INVITE_SETUP_ENABLED = previous_invites
 
         status, _, _ = self.request("POST", "/invite", {
             "Cookie": csrf_name + "=" + csrf,

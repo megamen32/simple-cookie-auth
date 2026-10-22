@@ -10,7 +10,8 @@ ENV PYTHONUNBUFFERED=1 \
     GPTADMIN_COOKIE_AUTH_PASSKEY_DB=/var/lib/gptadmin-cookie-auth/passkeys.sqlite3 \
     GPTADMIN_COOKIE_AUTH_ACCESS_DB=/var/lib/gptadmin-cookie-auth/access.sqlite3 \
     GPTADMIN_COOKIE_AUTH_SITE_CATALOG=/app/sites.json \
-    GPTADMIN_COOKIE_AUTH_ADMIN_ENABLED=1
+    GPTADMIN_COOKIE_AUTH_ADMIN_ENABLED=1 \
+    GPTADMIN_COOKIE_AUTH_INVITE_SETUP_ENABLED=1
 
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir --requirement /app/requirements.txt

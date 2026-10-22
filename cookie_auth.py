@@ -39,6 +39,7 @@ ACCESS_DB = os.environ.get(
 )
 SITE_CATALOG_FILE = os.environ.get("GPTADMIN_COOKIE_AUTH_SITE_CATALOG", "/app/sites.json")
 ADMIN_ENABLED = os.environ.get("GPTADMIN_COOKIE_AUTH_ADMIN_ENABLED", "1") == "1"
+INVITE_SETUP_ENABLED = os.environ.get("GPTADMIN_COOKIE_AUTH_INVITE_SETUP_ENABLED", "1") == "1"
 
 
 def read_site_catalog() -> list[str]:
@@ -454,6 +455,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self, message: str = "", success: bool = False, status: int = 200, token: str = ""
     ) -> None:
         csrf, csrf_name, nonce = self._csrf_value(), csrf_cookie_name_for_page(), secrets.token_urlsafe(18)
+        if not INVITE_SETUP_ENABLED and not success:
+            body = (
+                '<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="referrer" content="no-referrer">'
+                '<meta name="viewport" content="width=device-width,initial-scale=1"><title>SSO</title><main>'
+                '<h1>Установка пароля временно недоступна</h1><p>Откройте ссылку на основном SSO.</p></main>'
+                f'<script nonce="{nonce}">history.replaceState(null,"",location.pathname)</script></html>'
+            )
+            self._send_html(body, csrf=csrf, nonce=nonce, csrf_cookie_name=csrf_name, status=503)
+            return
         try:
             invite = access_control.invite_info(ACCESS_DB, token) if token else None
         except Exception:
@@ -1103,6 +1113,9 @@ const confirm=document.getElementById('confirm-revoke');if(confirm)confirm.addEv
             self._admin_page("Неизвестная операция.", status=400)
             return
         if parsed.path == "/invite":
+            if not INVITE_SETUP_ENABLED:
+                self._invite_page(status=503)
+                return
             data = self._form_data()
             if data is None:
                 self._send_json(403, {"error": "request rejected"})
