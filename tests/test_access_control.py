@@ -153,6 +153,14 @@ class AccessControlHttpTests(unittest.TestCase):
         status, _, _ = self.request("GET", "/admin", {"Cookie": user_cookie})
         self.assertEqual(403, status)
 
+        previous = cookie_auth.ADMIN_ENABLED
+        cookie_auth.ADMIN_ENABLED = False
+        try:
+            status, _, _ = self.request("GET", "/admin", {"Cookie": owner_cookie})
+            self.assertEqual(403, status)
+        finally:
+            cookie_auth.ADMIN_ENABLED = previous
+
         status, _, _ = self.request("POST", "/invite", {
             "Cookie": csrf_name + "=" + csrf,
             "Origin": "https://auth.bezrabotnyi.com",

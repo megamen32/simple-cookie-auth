@@ -38,6 +38,7 @@ ACCESS_DB = os.environ.get(
     "GPTADMIN_COOKIE_AUTH_ACCESS_DB", "/var/lib/gptadmin-cookie-auth/access.sqlite3"
 )
 SITE_CATALOG_FILE = os.environ.get("GPTADMIN_COOKIE_AUTH_SITE_CATALOG", "/app/sites.json")
+ADMIN_ENABLED = os.environ.get("GPTADMIN_COOKIE_AUTH_ADMIN_ENABLED", "1") == "1"
 
 
 def read_site_catalog() -> list[str]:
@@ -363,6 +364,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return data
 
     def _admin_user(self) -> str | None:
+        if not ADMIN_ENABLED:
+            return None
         user = self.current_user()
         try:
             return user if user and access_control.is_admin(ACCESS_DB, user) else None
