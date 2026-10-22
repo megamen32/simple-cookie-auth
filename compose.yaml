@@ -15,6 +15,8 @@ services:
       GPTADMIN_COOKIE_AUTH_DEFAULT_REDIRECT: ${COOKIE_AUTH_DEFAULT_REDIRECT:?set COOKIE_AUTH_DEFAULT_REDIRECT}
       GPTADMIN_COOKIE_AUTH_PASSKEYS_ENABLED: "1"
       GPTADMIN_COOKIE_AUTH_PASSKEY_DB: /var/lib/gptadmin-cookie-auth/passkeys.sqlite3
+      GPTADMIN_COOKIE_AUTH_ACCESS_DB: /var/lib/gptadmin-cookie-auth/access.sqlite3
+      GPTADMIN_COOKIE_AUTH_SITE_CATALOG: /app/sites.json
     volumes:
       - ${COOKIE_AUTH_HTPASSWD:?set COOKIE_AUTH_HTPASSWD}:/run/secrets/htpasswd:ro
       - ${COOKIE_AUTH_SECRET_FILE:?set COOKIE_AUTH_SECRET_FILE}:/run/secrets/cookie_secret:ro

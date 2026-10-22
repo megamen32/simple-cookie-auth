@@ -7,11 +7,13 @@ ENV PYTHONUNBUFFERED=1 \
     GPTADMIN_COOKIE_AUTH_SECRET_FILE=/run/secrets/cookie_secret \
     GPTADMIN_COOKIE_AUTH_DOMAIN=.example.com \
     GPTADMIN_COOKIE_AUTH_PASSKEYS_ENABLED=1 \
-    GPTADMIN_COOKIE_AUTH_PASSKEY_DB=/var/lib/gptadmin-cookie-auth/passkeys.sqlite3
+    GPTADMIN_COOKIE_AUTH_PASSKEY_DB=/var/lib/gptadmin-cookie-auth/passkeys.sqlite3 \
+    GPTADMIN_COOKIE_AUTH_ACCESS_DB=/var/lib/gptadmin-cookie-auth/access.sqlite3 \
+    GPTADMIN_COOKIE_AUTH_SITE_CATALOG=/app/sites.json
 
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir --requirement /app/requirements.txt
-COPY cookie_auth.py passkeys.py /app/
+COPY cookie_auth.py passkeys.py access_control.py sites.json /app/
 
 HEALTHCHECK --interval=30s --timeout=4s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18991/healthz', timeout=3).close()" || exit 1

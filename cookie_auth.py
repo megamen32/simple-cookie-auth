@@ -12,7 +12,10 @@ import secrets
 import subprocess
 import time
 import urllib.parse
+from pathlib import Path
 from http import HTTPStatus
+
+import access_control
 
 
 HOST = os.environ.get("GPTADMIN_COOKIE_AUTH_HOST", "127.0.0.1")
@@ -31,6 +34,18 @@ MAX_JSON_BODY = 64 * 1024
 DEFAULT_REDIRECT = os.environ.get(
     "GPTADMIN_COOKIE_AUTH_DEFAULT_REDIRECT", "https://bezrabotnyi.com/"
 )
+ACCESS_DB = os.environ.get(
+    "GPTADMIN_COOKIE_AUTH_ACCESS_DB", "/var/lib/gptadmin-cookie-auth/access.sqlite3"
+)
+SITE_CATALOG_FILE = os.environ.get("GPTADMIN_COOKIE_AUTH_SITE_CATALOG", "/app/sites.json")
+
+
+def read_site_catalog() -> list[str]:
+    with open(SITE_CATALOG_FILE, "r", encoding="utf-8") as catalog_file:
+        value = json.load(catalog_file)
+    if not isinstance(value, list):
+        raise RuntimeError("invalid SSO site catalog")
+    return [str(host) for host in value]
 
 
 def read_secret() -> bytes:
@@ -43,7 +58,7 @@ def read_secret() -> bytes:
 
 
 def read_users() -> dict[str, str]:
-    """Read Apache htpasswd-compatible user hashes from the configured file."""
+    """Read legacy hashes and stable managed-account fingerprints for passkey binding."""
     users: dict[str, str] = {}
     with open(HTPASSWD, "r", encoding="utf-8") as users_file:
         for line in users_file:
@@ -52,6 +67,12 @@ def read_users() -> dict[str, str]:
                 continue
             user, hashed = line.split(":", 1)
             users[user] = hashed
+    try:
+        users.update(access_control.managed_password_hashes(ACCESS_DB))
+    except Exception:
+        # The persistent account DB is created before the service starts. This
+        # also lets bootstrap read the legacy file before the first DB exists.
+        pass
     return users
 
 
@@ -74,10 +95,24 @@ def verify_apr1(password: str, stored: str) -> bool:
 
 
 def authenticate_password(username: str, password: str) -> str | None:
-    """Return the exact verified account, including the legacy blank-user fallback."""
+    """Verify an active managed account or the single legacy super-admin."""
+    username = username.strip()
     users = read_users()
     if not username and users:
         username = next(iter(users))
+    try:
+        account = access_control.get_user(ACCESS_DB, username)
+    except Exception:
+        print("[auth] account store unavailable", flush=True)
+        return None
+    if not account or account["status"] != "active":
+        return None
+    if not account["legacy"]:
+        if not account["password_salt"] or not account["password_hash"]:
+            return None
+        return username if access_control.verify_password(
+            password, account["password_salt"], account["password_hash"]
+        ) else None
     stored = users.get(username)
     if not stored:
         return None
@@ -189,15 +224,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
     server_version = "gptadmin-cookie-auth/1.0"
 
     def log_message(self, fmt: str, *args: object) -> None:
+        message = fmt % args
+        if self.path.startswith("/invite"):
+            message = message.replace(self.path, "/invite")
         print(
             "%s - - [%s] %s"
-            % (self.client_address[0], self.log_date_time_string(), fmt % args),
+            % (self.client_address[0], self.log_date_time_string(), message),
             flush=True,
         )
 
     def current_user(self) -> str | None:
         cookies = parse_cookie(self.headers.get("Cookie", ""))
-        return check_token(cookies.get(COOKIE_NAME, ""))
+        username = check_token(cookies.get(COOKIE_NAME, ""))
+        if not username:
+            return None
+        try:
+            account = access_control.get_user(ACCESS_DB, username)
+        except Exception:
+            return None
+        return username if account and account["status"] == "active" else None
 
     def _security_headers(self, nonce: str | None = None) -> None:
         self.send_header("Cache-Control", "no-store")
@@ -292,6 +337,157 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _csrf_value(self) -> str:
         value = secrets.token_urlsafe(32)
         return value
+
+    def _form_data(self):
+        if self.headers.get("Origin", "") != "https://auth.bezrabotnyi.com":
+            return None
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if content_type != "application/x-www-form-urlencoded":
+            return None
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+        except ValueError:
+            return None
+        if length < 1 or length > MAX_JSON_BODY:
+            return None
+        try:
+            data = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"), keep_blank_values=True)
+        except UnicodeDecodeError:
+            return None
+        cookies = parse_cookie(self.headers.get("Cookie", ""))
+        cookie_name = data.get("csrf_cookie_name", [""])[0]
+        csrf_cookie = cookies.get(cookie_name, "") if valid_csrf_cookie_name(cookie_name) else ""
+        csrf_form = data.get("csrf", [""])[0]
+        if not csrf_cookie or not hmac.compare_digest(csrf_cookie, csrf_form):
+            return None
+        return data
+
+    def _admin_user(self) -> str | None:
+        user = self.current_user()
+        try:
+            return user if user and access_control.is_admin(ACCESS_DB, user) else None
+        except Exception:
+            return None
+
+    def _admin_page(self, message: str = "", invite_url: str = "", status: int = 200) -> None:
+        admin = self._admin_user()
+        if not admin:
+            user = self.current_user()
+            if not user:
+                self.send_response(HTTPStatus.FOUND)
+                self.send_header("Location", "/login?rd=" + urllib.parse.quote(
+                    "https://auth.bezrabotnyi.com/admin", safe=""
+                ))
+                self.end_headers()
+                return
+            code = HTTPStatus.FORBIDDEN
+            self.send_response(code)
+            self._security_headers()
+            self.end_headers()
+            return
+        sites = access_control.list_sites(ACCESS_DB)
+        users = access_control.list_users(ACCESS_DB)
+        nonce, csrf_name, csrf = secrets.token_urlsafe(18), csrf_cookie_name_for_page(), self._csrf_value()
+        options = "".join(
+            f'<label><input type="checkbox" name="sites" value="{html.escape(site, quote=True)}"> {html.escape(site)}</label>'
+            for site in sites
+        )
+        cards = []
+        for account in users:
+            name = html.escape(account["display_name"])
+            login = html.escape(account["username"], quote=True)
+            if account["is_admin"]:
+                cards.append(f'<article><b>{name}</b><small>{login} · супер администратор · все сайты</small></article>')
+                continue
+            selected = set(account["sites"])
+            checks = "".join(
+                f'<label><input type="checkbox" name="sites" value="{html.escape(site, quote=True)}"'
+                f'{" checked" if site in selected else ""}> {html.escape(site)}</label>' for site in sites
+            )
+            state_values = (("pending", "Ожидает установки пароля"), ("disabled", "Отключён")) if account["status"] == "pending" else (("active", "Активен"), ("disabled", "Отключён"))
+            state = "".join(
+                f'<option value="{key}"{" selected" if account["status"] == key else ""}>{label}</option>'
+                for key, label in state_values
+            )
+            cards.append(
+                f'<article><h3>{name}</h3><small>{login}</small><form method="post" action="/admin">'
+                f'<input type="hidden" name="csrf" value="{csrf}"><input type="hidden" name="csrf_cookie_name" value="{csrf_name}">'
+                '<input type="hidden" name="action" value="update">'
+                f'<input type="hidden" name="username" value="{login}"><label>Статус <select name="status">{state}</select></label>'
+                f'<fieldset><legend>Разрешённые сайты</legend><div class="sites">{checks}</div></fieldset>'
+                '<button>Сохранить доступ</button></form></article>'
+            )
+        message_html = f'<p class="message">{html.escape(message)}</p>' if message else ""
+        invite_html = ""
+        if invite_url:
+            invite_html = (
+                '<section class="invite"><h2>Ссылка создана</h2><p>Передайте её пользователю. Она действует 24 часа и используется один раз.</p>'
+                f'<input id="invite-link" readonly value="{html.escape(invite_url, quote=True)}">'
+                '<button type="button" id="copy-link">Скопировать ссылку</button></section>'
+            )
+        body = (
+            '<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<title>Управление доступом SSO</title><style>body{font:16px system-ui;background:#f2f5f8;color:#17202a;margin:0}'
+            'main{max-width:1000px;margin:36px auto;padding:0 18px}header,section,article{background:white;border:1px solid #dce2e9;'
+            'border-radius:14px;padding:20px;margin:16px 0}small{display:block;color:#657385;margin:4px 0 12px}button{font:inherit;padding:10px 16px;'
+            'border:0;border-radius:8px;background:#1959a6;color:white;cursor:pointer}input,select{font:inherit;padding:9px;border:1px solid #aeb9c6;'
+            'border-radius:8px}.sites{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:6px}fieldset{border:1px solid #dce2e9;'
+            'border-radius:10px;margin:14px 0}.message{color:#17683c}.invite input{width:min(100%,680px)}a{color:#1959a6}</style></head><body><main>'
+            '<header><p>SSO · супер администратор</p><h1>Пользователи и доступ</h1>'
+            '<p>Разрешения проверяются на каждом запросе к сайту.</p><a href="/logout?rd=https%3A%2F%2Fauth.bezrabotnyi.com%2Flogin">Выйти</a></header>'
+            + message_html + invite_html
+            + '<section><h2>Добавить пользователя</h2><p>Новый пользователь задаст пароль по одноразовой ссылке.</p>'
+            + f'<form method="post" action="/admin"><input type="hidden" name="csrf" value="{csrf}"><input type="hidden" name="csrf_cookie_name" value="{csrf_name}">'
+            + '<input type="hidden" name="action" value="create"><p><label>Логин<br><input name="username" required maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._-]*"></label></p>'
+            + '<p><label>Имя<br><input name="display_name" required maxlength="100"></label></p>'
+            + f'<fieldset><legend>Разрешённые сайты</legend><div class="sites">{options}</div></fieldset><button>Создать и получить ссылку</button></form></section>'
+            + '<section><h2>Учётные записи</h2>' + "".join(cards) + '</section></main>'
+            + f'<script nonce="{nonce}">const b=document.getElementById("copy-link");if(b)b.onclick=async()=>{{await navigator.clipboard.writeText(document.getElementById("invite-link").value);b.textContent="Ссылка скопирована"}};</script>'
+            + '</body></html>'
+        )
+        self._send_html(body, csrf=csrf, nonce=nonce, csrf_cookie_name=csrf_name, status=status)
+
+    def _invite_page(
+        self, message: str = "", success: bool = False, status: int = 200, token: str = ""
+    ) -> None:
+        csrf, csrf_name, nonce = self._csrf_value(), csrf_cookie_name_for_page(), secrets.token_urlsafe(18)
+        try:
+            invite = access_control.invite_info(ACCESS_DB, token) if token else None
+        except Exception:
+            invite = None
+        if success:
+            content = '<p>Пароль установлен. Теперь можно войти.</p><a href="/login">Перейти ко входу</a>'
+        elif invite or not token:
+            token_value = html.escape(token, quote=True)
+            content = (
+                '<form id="invite-form" method="post" action="/invite">'
+                f'<input id="invite-token" type="hidden" name="token" value="{token_value}">'
+                f'<input type="hidden" name="csrf" value="{csrf}">'
+                f'<input type="hidden" name="csrf_cookie_name" value="{csrf_name}">'
+                '<label>Пароль (не менее 12 символов)<br><input name="password" type="password" minlength="12" maxlength="1024" required autocomplete="new-password"></label><br><br>'
+                '<label>Повторите пароль<br><input name="password_confirm" type="password" minlength="12" maxlength="1024" required autocomplete="new-password"></label><br><br>'
+                '<button>Установить пароль</button></form>'
+            )
+        else:
+            content = '<a href="/login">Перейти ко входу</a>'
+            status = max(status, HTTPStatus.GONE)
+        script = (
+            '<script nonce="' + nonce + '">const t=new URLSearchParams(location.hash.slice(1)).get("token");'
+            'history.replaceState(null,"",location.pathname);const f=document.getElementById("invite-form");'
+            'if(f&&t)document.getElementById("invite-token").value=t;else if(f){f.hidden=true;'
+            'const e=document.createElement("p");e.textContent="В ссылке нет кода приглашения.";f.before(e);}</script>'
+            if not token else ""
+        )
+        body = (
+            '<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<title>Установка пароля SSO</title><style>body{font:16px system-ui;background:#f2f5f8;color:#17202a;margin:0}'
+            'main{max-width:540px;margin:50px auto;padding:28px;background:white;border:1px solid #dce2e9;border-radius:14px}'
+            'input{font:inherit;padding:10px;border:1px solid #aeb9c6;border-radius:8px;width:95%}button{font:inherit;padding:10px 16px;border:0;border-radius:8px;background:#1959a6;color:white}</style></head><body><main>'
+            '<h1>Задайте пароль</h1>'
+            + (f'<p>{html.escape(message)}</p>' if message else "")
+            + content + script + '</main></body></html>'
+        )
+        self._send_html(body, csrf=csrf, nonce=nonce, csrf_cookie_name=csrf_name, status=status)
 
     def _login_page(self, redirect: str, error: bool = False) -> None:
         csrf = self._csrf_value()
@@ -828,11 +1024,25 @@ const confirm=document.getElementById('confirm-revoke');if(confirm)confirm.addEv
             return
         if path in ("/check", "/auth/check"):
             user = self.current_user()
-            self.send_response(HTTPStatus.NO_CONTENT if user else HTTPStatus.UNAUTHORIZED)
+            status = HTTPStatus.UNAUTHORIZED if not user else HTTPStatus.NO_CONTENT
+            site = self.headers.get("X-Forwarded-Host", "").split(",", 1)[0].split(":", 1)[0]
+            if user and site:
+                try:
+                    if not access_control.can_access(ACCESS_DB, user, site):
+                        status = HTTPStatus.FORBIDDEN
+                except Exception:
+                    status = HTTPStatus.SERVICE_UNAVAILABLE
+            self.send_response(status)
             self._security_headers()
-            if user:
+            if user and status == HTTPStatus.NO_CONTENT:
                 self.send_header("X-GPTAdmin-User", user)
             self.end_headers()
+            return
+        if path == "/admin":
+            self._admin_page()
+            return
+        if path == "/invite":
+            self._invite_page()
             return
         if path in ("/logout", "/auth/logout"):
             self.send_response(HTTPStatus.FOUND)
@@ -854,6 +1064,65 @@ const confirm=document.getElementById('confirm-revoke');if(confirm)confirm.addEv
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/admin":
+            data = self._form_data()
+            admin = self._admin_user()
+            if data is None or not admin:
+                self._send_json(403, {"error": "request rejected"})
+                return
+            action = data.get("action", [""])[0]
+            if action == "create":
+                username = data.get("username", [""])[0]
+                display_name = data.get("display_name", [""])[0]
+                sites = data.get("sites", [])
+                try:
+                    token, _ = access_control.create_invite(ACCESS_DB, username, display_name, sites)
+                    invite_url = "https://auth.bezrabotnyi.com/invite#token=" + urllib.parse.quote(token, safe="-_")
+                    self._admin_page("Пользователь добавлен. Скопируйте ссылку и передайте её пользователю.", invite_url)
+                except ValueError:
+                    self._admin_page("Проверьте логин и список сайтов.", status=400)
+                except Exception:
+                    self._admin_page("Не удалось создать пользователя. Проверьте, не занят ли логин.", status=400)
+                return
+            if action == "update":
+                username = data.get("username", [""])[0]
+                sites = data.get("sites", [])
+                state = data.get("status", [""])[0]
+                try:
+                    saved = access_control.update_user(ACCESS_DB, username, sites, state)
+                except Exception:
+                    saved = False
+                self._admin_page(
+                    "Доступ сохранён." if saved else "Не удалось сохранить изменения.",
+                    status=200 if saved else 400,
+                )
+                return
+            self._admin_page("Неизвестная операция.", status=400)
+            return
+        if parsed.path == "/invite":
+            data = self._form_data()
+            if data is None:
+                self._send_json(403, {"error": "request rejected"})
+                return
+            token = data.get("token", [""])[0]
+            password = data.get("password", [""])[0]
+            confirmation = data.get("password_confirm", [""])[0]
+            if password != confirmation:
+                self._invite_page("Пароли не совпадают. Попробуйте ещё раз.", status=400, token=token)
+                return
+            try:
+                username = access_control.consume_invite(ACCESS_DB, token, password)
+            except Exception:
+                username = None
+            if username:
+                self._invite_page(success=True)
+            else:
+                self._invite_page(
+                    "Ссылка недействительна, истекла или уже использована. Попросите новую.",
+                    status=410,
+                    token=token,
+                )
+            return
         if parsed.path.startswith("/passkey/"):
             module = passkeys_module()
             if module is None:
@@ -944,4 +1213,5 @@ const confirm=document.getElementById('confirm-revoke');if(confirm)confirm.addEv
 
 
 if __name__ == "__main__":
+    access_control.initialize(ACCESS_DB, read_site_catalog(), read_users())
     http.server.ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
