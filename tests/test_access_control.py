@@ -108,6 +108,9 @@ class AccessControlHttpTests(unittest.TestCase):
         return name, value
 
     def test_admin_invite_sets_password_once_and_check_enforces_per_host(self):
+        status, _, _ = self.request("GET", "/healthz")
+        self.assertEqual(200, status)
+
         owner_cookie = "gptadmin_auth=" + cookie_auth.make_token("owner")
         status, headers, body = self.request("GET", "/admin", {"Cookie": owner_cookie})
         self.assertEqual(200, status)

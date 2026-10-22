@@ -1032,6 +1032,11 @@ const confirm=document.getElementById('confirm-revoke');if(confirm)confirm.addEv
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
+        if path == "/healthz":
+            self.send_response(HTTPStatus.OK)
+            self._security_headers()
+            self.end_headers()
+            return
         if path == "/passkeys":
             self._passkeys_page()
             return
