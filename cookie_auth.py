@@ -384,72 +384,383 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 ))
                 self.end_headers()
                 return
-            code = HTTPStatus.FORBIDDEN
-            self.send_response(code)
+            self.send_response(HTTPStatus.FORBIDDEN)
             self._security_headers()
             self.end_headers()
             return
+
         sites = access_control.list_sites(ACCESS_DB)
         users = access_control.list_users(ACCESS_DB)
+        managed_users = [account for account in users if not account["is_admin"]]
+        active_count = sum(account["status"] == "active" for account in managed_users)
+        pending_count = sum(account["status"] == "pending" for account in managed_users)
         nonce, csrf_name, csrf = secrets.token_urlsafe(18), csrf_cookie_name_for_page(), self._csrf_value()
-        options = "".join(
-            f'<label><input type="checkbox" name="sites" value="{html.escape(site, quote=True)}"> {html.escape(site)}</label>'
-            for site in sites
-        )
+
+        def site_picker(selected_sites: set[str] | None = None) -> str:
+            selected = selected_sites or set()
+            items = "".join(
+                '<label class="site-option" data-site-option data-site-name="'
+                + html.escape(site.lower(), quote=True)
+                + '"><input type="checkbox" name="sites" value="'
+                + html.escape(site, quote=True)
+                + ('" checked>' if site in selected else '">')
+                + '<span class="site-check" aria-hidden="true"></span><span class="site-copy"><strong>'
+                + html.escape(site)
+                + '</strong><small>Доступ через SSO</small></span></label>'
+                for site in sites
+            )
+            return (
+                '<div class="site-picker" data-site-picker>'
+                '<div class="site-picker-head">'
+                '<label class="search-field"><span class="sr-only">Найти сайт</span>'
+                '<input type="search" data-site-search placeholder="Найти сайт по адресу" autocomplete="off"></label>'
+                '<div class="picker-actions"><span data-selected-count>'
+                + str(len(selected))
+                + ' выбрано</span><button class="text-button" type="button" data-site-all>Выбрать все</button>'
+                '<button class="text-button muted" type="button" data-site-clear>Очистить</button></div></div>'
+                '<div class="site-grid" data-site-list>'
+                + items
+                + '</div><p class="field-hint">Неотмеченные сайты для пользователя закрыты.</p></div>'
+            )
+
         cards = []
         for account in users:
-            name = html.escape(account["display_name"])
+            raw_name = account["display_name"] or account["username"]
+            name = html.escape(raw_name)
             login = html.escape(account["username"], quote=True)
+            initial = html.escape(raw_name[:1].upper())
             if account["is_admin"]:
-                cards.append(f'<article><b>{name}</b><small>{login} · супер администратор · все сайты</small></article>')
+                cards.append(
+                    '<article class="account-card owner-card" data-account-card data-account-search="'
+                    + html.escape((raw_name + " " + account["username"]).lower(), quote=True)
+                    + '"><div class="account-identity"><span class="avatar owner-avatar">'
+                    + initial
+                    + '</span><div><h3>'
+                    + name
+                    + '</h3><p>@'
+                    + login
+                    + '</p></div><span class="status-badge admin-badge">Суперадминистратор</span></div>'
+                    '<div class="owner-note"><span class="owner-check">✓</span><span><strong>Полный доступ</strong>'
+                    '<small>Все сайты SSO и настройки доступа</small></span></div></article>'
+                )
                 continue
+
             selected = set(account["sites"])
-            checks = "".join(
-                f'<label><input type="checkbox" name="sites" value="{html.escape(site, quote=True)}"'
-                f'{" checked" if site in selected else ""}> {html.escape(site)}</label>' for site in sites
+            status_values = (
+                (("pending", "Ожидает установки пароля"), ("disabled", "Отключён"))
+                if account["status"] == "pending"
+                else (("active", "Активен"), ("disabled", "Отключён"))
             )
-            state_values = (("pending", "Ожидает установки пароля"), ("disabled", "Отключён")) if account["status"] == "pending" else (("active", "Активен"), ("disabled", "Отключён"))
-            state = "".join(
-                f'<option value="{key}"{" selected" if account["status"] == key else ""}>{label}</option>'
-                for key, label in state_values
+            status_options = "".join(
+                '<option value="' + key + '"'
+                + (" selected" if account["status"] == key else "")
+                + ">"
+                + label
+                + "</option>"
+                for key, label in status_values
             )
+            status_labels = {
+                "pending": ("Ожидает настройки", "pending-badge"),
+                "active": ("Активен", "active-badge"),
+                "disabled": ("Отключён", "disabled-badge"),
+            }
+            badge_text, badge_class = status_labels.get(account["status"], ("Неизвестно", "disabled-badge"))
             cards.append(
-                f'<article><h3>{name}</h3><small>{login}</small><form method="post" action="/admin">'
-                f'<input type="hidden" name="csrf" value="{csrf}"><input type="hidden" name="csrf_cookie_name" value="{csrf_name}">'
-                '<input type="hidden" name="action" value="update">'
-                f'<input type="hidden" name="username" value="{login}"><label>Статус <select name="status">{state}</select></label>'
-                f'<fieldset><legend>Разрешённые сайты</legend><div class="sites">{checks}</div></fieldset>'
-                '<button>Сохранить доступ</button></form></article>'
+                '<article class="account-card" data-account-card data-account-search="'
+                + html.escape((raw_name + " " + account["username"]).lower(), quote=True)
+                + '"><div class="account-identity"><span class="avatar">'
+                + initial
+                + '</span><div class="account-title"><h3>'
+                + name
+                + '</h3><p>@'
+                + login
+                + '</p></div><span class="status-badge '
+                + badge_class
+                + '">'
+                + badge_text
+                + '</span></div><div class="account-summary"><span class="grant-dot"></span><span>'
+                + str(len(selected))
+                + " из "
+                + str(len(sites))
+                + ' сайтов доступно</span><details class="access-details"><summary>Настроить доступ</summary>'
+                '<form method="post" action="/admin" class="access-form">'
+                '<input type="hidden" name="csrf" value="__CSRF__"><input type="hidden" name="csrf_cookie_name" value="__CSRF_NAME__">'
+                '<input type="hidden" name="action" value="update"><input type="hidden" name="username" value="'
+                + login
+                + '"><label class="status-field"><span>Состояние учётной записи</span><select name="status">'
+                + status_options
+                + '</select></label><fieldset class="site-fieldset"><legend>Разрешённые сайты</legend>'
+                + site_picker(selected)
+                + '</fieldset><div class="form-footer"><span class="field-hint">Изменения применяются сразу после сохранения.</span>'
+                '<button class="primary-button" type="submit">Сохранить изменения</button></div></form></details></div></article>'
             )
-        message_html = f'<p class="message">{html.escape(message)}</p>' if message else ""
+
+        notice_class = "error-notice" if status >= 400 else "success-notice"
+        message_html = (
+            '<div class="notice ' + notice_class + '" role="status" aria-live="polite"><span class="notice-icon">✓</span><p>'
+            + html.escape(message)
+            + "</p></div>"
+            if message
+            else ""
+        )
         invite_html = ""
         if invite_url:
             invite_html = (
-                '<section class="invite"><h2>Ссылка создана</h2><p>Передайте её пользователю. Она действует 24 часа и используется один раз.</p>'
-                f'<input id="invite-link" readonly value="{html.escape(invite_url, quote=True)}">'
-                '<button type="button" id="copy-link">Скопировать ссылку</button></section>'
+                '<section class="invite-card" aria-labelledby="invite-title"><div class="invite-icon">↗</div>'
+                '<div class="invite-copy"><p class="eyebrow">Доступ подготовлен</p><h2 id="invite-title">Ссылка для установки пароля</h2>'
+                '<p>Передайте её пользователю. Ссылка действует 24 часа и сработает один раз.</p>'
+                '<div class="invite-link-row"><input id="invite-link" readonly aria-label="Одноразовая ссылка" value="'
+                + html.escape(invite_url, quote=True)
+                + '"><button id="copy-link" class="primary-button" type="button">Скопировать ссылку</button></div></div></section>'
             )
-        body = (
-            '<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-            '<title>Управление доступом SSO</title><style>body{font:16px system-ui;background:#f2f5f8;color:#17202a;margin:0}'
-            'main{max-width:1000px;margin:36px auto;padding:0 18px}header,section,article{background:white;border:1px solid #dce2e9;'
-            'border-radius:14px;padding:20px;margin:16px 0}small{display:block;color:#657385;margin:4px 0 12px}button{font:inherit;padding:10px 16px;'
-            'border:0;border-radius:8px;background:#1959a6;color:white;cursor:pointer}input,select{font:inherit;padding:9px;border:1px solid #aeb9c6;'
-            'border-radius:8px}.sites{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:6px}fieldset{border:1px solid #dce2e9;'
-            'border-radius:10px;margin:14px 0}.message{color:#17683c}.invite input{width:min(100%,680px)}a{color:#1959a6}</style></head><body><main>'
-            '<header><p>SSO · супер администратор</p><h1>Пользователи и доступ</h1>'
-            '<p>Разрешения проверяются на каждом запросе к сайту.</p><a href="/logout?rd=https%3A%2F%2Fauth.bezrabotnyi.com%2Flogin">Выйти</a></header>'
-            + message_html + invite_html
-            + '<section><h2>Добавить пользователя</h2><p>Новый пользователь задаст пароль по одноразовой ссылке.</p>'
-            + f'<form method="post" action="/admin"><input type="hidden" name="csrf" value="{csrf}"><input type="hidden" name="csrf_cookie_name" value="{csrf_name}">'
-            + '<input type="hidden" name="action" value="create"><p><label>Логин<br><input name="username" required maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._-]*"></label></p>'
-            + '<p><label>Имя<br><input name="display_name" required maxlength="100"></label></p>'
-            + f'<fieldset><legend>Разрешённые сайты</legend><div class="sites">{options}</div></fieldset><button>Создать и получить ссылку</button></form></section>'
-            + '<section><h2>Учётные записи</h2>' + "".join(cards) + '</section></main>'
-            + f'<script nonce="{nonce}">const b=document.getElementById("copy-link");if(b)b.onclick=async()=>{{await navigator.clipboard.writeText(document.getElementById("invite-link").value);b.textContent="Ссылка скопирована"}};</script>'
-            + '</body></html>'
+
+        page = """<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Пользователи и доступ · SSO</title>
+<style>
+:root{color-scheme:light;--ink:#172033;--muted:#788397;--line:#e7eaf1;--paper:#fff;--canvas:#f4f6fa;--nav:#121a2b;--accent:#5757e8;--accent-dark:#4141cf;--accent-soft:#efefff;--green:#1b8b64;--green-soft:#e9f7f0;--amber:#ad6b13;--amber-soft:#fff5df;--red:#b74a54;--red-soft:#fff0f1;--shadow:0 18px 45px rgba(22,34,55,.07)}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--canvas);color:var(--ink);font:15px/1.5 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+button,input,select{font:inherit}
+button{cursor:pointer}
+a{color:inherit;text-decoration:none}
+.layout{min-height:100vh}
+.sidebar{position:fixed;inset:0 auto 0 0;width:252px;padding:28px 18px;background:var(--nav);color:#eef1fb;display:flex;flex-direction:column;z-index:2}
+.brand{display:flex;align-items:center;gap:12px;padding:2px 10px 32px}
+.brand-mark{width:36px;height:36px;border-radius:12px;background:linear-gradient(145deg,#7776ff,#5553e8);display:grid;place-items:center;color:white;font-weight:800;box-shadow:0 8px 22px #4f4bd955}
+.brand-name{font-weight:750;font-size:15px;letter-spacing:.01em}
+.brand-caption{display:block;color:#8d98ad;font-size:11px;margin-top:1px}
+.nav-label{padding:0 12px 8px;color:#737f96;text-transform:uppercase;letter-spacing:.12em;font-size:10px;font-weight:750}
+.side-nav{display:grid;gap:5px}
+.side-nav a{padding:11px 12px;border-radius:10px;color:#aeb8cb;display:flex;align-items:center;gap:11px;font-size:13px;font-weight:600}
+.side-nav a:hover,.side-nav a.active{color:white;background:#252f43}
+.nav-icon{width:20px;text-align:center;color:#aaa9ff;font-size:16px}
+.sidebar-bottom{margin-top:auto;padding:16px 10px 4px;border-top:1px solid #293347}
+.admin-mini{display:flex;align-items:center;gap:10px}
+.admin-mini .avatar{width:34px;height:34px;background:#293451;color:#c8c7ff}
+.admin-mini strong{display:block;font-size:12px}
+.admin-mini small{display:block;color:#8d98ad;font-size:11px}
+.logout{display:inline-block;margin:14px 0 0 44px;font-size:12px;color:#aab4c7}
+.logout:hover{color:white}
+.main{margin-left:252px;max-width:1480px;padding:36px clamp(24px,4vw,64px) 72px}
+.topline{display:flex;justify-content:space-between;align-items:center;margin-bottom:30px;color:var(--muted);font-size:12px}
+.breadcrumb{display:flex;align-items:center;gap:9px}
+ .breadcrumb strong{color:#333d51;font-weight:650}
+.top-actions{display:flex;align-items:center;gap:14px}.top-logout{color:#7d879a;font-size:11px;font-weight:650}.top-logout:hover{color:#343e53}
+.secure-pill{display:flex;align-items:center;gap:7px;border:1px solid #dcefe6;background:#f0fbf5;color:#247a5b;border-radius:999px;padding:6px 11px;font-size:11px;font-weight:700}
+.secure-dot{width:7px;height:7px;background:#32a878;border-radius:50%;box-shadow:0 0 0 3px #32a87820}
+.hero{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;margin-bottom:28px}
+.eyebrow{margin:0 0 8px;color:var(--accent);font-size:10px;letter-spacing:.14em;text-transform:uppercase;font-weight:800}
+h1{margin:0;font-size:clamp(28px,3.3vw,38px);line-height:1.12;letter-spacing:-.045em;font-weight:760}
+.hero-copy{max-width:570px;margin:11px 0 0;color:var(--muted);font-size:14px}
+.hero-policy{min-width:220px;padding:14px 17px;border:1px solid #dfe4ee;border-radius:14px;background:#fff}
+.hero-policy strong{display:block;font-size:12px}
+.hero-policy span{display:block;margin-top:4px;color:var(--muted);font-size:11px}
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:13px;margin-bottom:24px}
+.stat-card{padding:17px 19px;border:1px solid var(--line);border-radius:15px;background:var(--paper);box-shadow:0 4px 14px #17203305}
+.stat-top{display:flex;justify-content:space-between;align-items:center;color:var(--muted);font-size:11px;font-weight:650}
+.stat-icon{display:grid;place-items:center;width:29px;height:29px;border-radius:9px;background:var(--accent-soft);color:var(--accent);font-weight:800}
+.stat-value{display:block;margin-top:10px;font-size:27px;line-height:1;font-weight:760;letter-spacing:-.04em}
+.stat-caption{display:block;margin-top:7px;color:#9aa3b3;font-size:10px}
+.content-grid{display:grid;grid-template-columns:minmax(280px,.82fr) minmax(0,1.45fr);gap:20px;align-items:start}
+.panel{border:1px solid var(--line);border-radius:18px;background:var(--paper);box-shadow:var(--shadow)}
+.panel-heading{padding:22px 23px 16px;border-bottom:1px solid #eef0f5}
+.panel-heading h2{margin:0;font-size:16px;letter-spacing:-.02em}
+.panel-heading p{margin:5px 0 0;color:var(--muted);font-size:12px}
+.create-panel{position:sticky;top:20px}
+.create-form{padding:20px 23px 23px}
+.form-fields{display:grid;gap:15px}
+.text-field,.status-field{display:grid;gap:6px}
+.text-field>span,.status-field>span,.search-field>span{font-size:11px;font-weight:700;color:#505b70}
+.text-field input,.search-field input,.status-field select,.invite-link-row input{width:100%;min-height:42px;border:1px solid #dce1eb;border-radius:10px;background:#fff;padding:9px 12px;color:var(--ink);outline:none;transition:border .15s,box-shadow .15s}
+input::placeholder{color:#a6adba}
+.text-field input:focus,.search-field input:focus,.status-field select:focus,.invite-link-row input:focus{border-color:#7878f0;box-shadow:0 0 0 3px #5757e81a}
+.fieldset-label{display:flex;justify-content:space-between;align-items:baseline;margin:0 0 8px}
+ .site-fieldset>legend{padding:0;font-size:12px;font-weight:750}
+.fieldset-label small{color:var(--muted);font-size:10px}
+.site-fieldset{margin:17px 0 0;padding:14px 0 0;border:0;border-top:1px solid #eef0f5}
+.site-picker-head{display:grid;gap:9px;margin-bottom:9px}
+.search-field{display:block}
+.search-field input{min-height:38px;font-size:12px}
+.picker-actions{display:flex;align-items:center;gap:9px;color:var(--muted);font-size:10px}
+.picker-actions [data-selected-count]{margin-right:auto;color:#536078;font-weight:700}
+.text-button{padding:4px 0;border:0;background:none;color:var(--accent);font-size:10px;font-weight:700}
+.text-button:hover{text-decoration:underline}
+.text-button.muted{color:#8490a3}
+.site-grid{display:grid;grid-template-columns:1fr;gap:5px;max-height:245px;overflow:auto;padding:2px 4px 2px 1px;scrollbar-color:#d5d9e4 transparent;scrollbar-width:thin}
+.site-option{display:flex;align-items:center;gap:9px;min-width:0;padding:8px 9px;border:1px solid transparent;border-radius:10px;background:#f8f9fc;cursor:pointer;transition:background .15s,border .15s}
+.site-option:hover{background:#f1f2ff;border-color:#e4e3ff}
+.site-option:has(input:checked){background:#f2f1ff;border-color:#dedcff}
+.site-option input{position:absolute;opacity:0;width:1px;height:1px}
+.site-check{flex:0 0 16px;width:16px;height:16px;border:1px solid #ccd2df;border-radius:5px;background:#fff}
+.site-option input:checked+.site-check{background:var(--accent);border-color:var(--accent);box-shadow:inset 0 0 0 3px white}
+.site-option:focus-within{outline:3px solid #5757e829}
+.site-copy{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;min-width:0}
+.site-copy strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:650}
+.site-copy small{flex:none;color:#9aa3b3;font-size:9px}
+.field-hint{margin:8px 0 0;color:#919bad;font-size:10px}
+.primary-button{min-height:40px;padding:9px 14px;border:1px solid var(--accent);border-radius:10px;background:var(--accent);color:#fff;font-size:11px;font-weight:750;box-shadow:0 5px 12px #5757e824;transition:background .15s,transform .15s}
+.primary-button:hover{background:var(--accent-dark);transform:translateY(-1px)}
+.primary-button:focus-visible,.text-button:focus-visible,.side-nav a:focus-visible,summary:focus-visible{outline:3px solid #7776ff55;outline-offset:2px}
+.create-submit{width:100%;margin-top:17px}
+.directory-panel{min-width:0}
+.directory-toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:15px 21px;border-bottom:1px solid #eef0f5}
+.directory-toolbar .search-field{flex:1;max-width:310px}
+.directory-toolbar .search-field input{min-height:36px}
+.directory-count{color:var(--muted);font-size:10px;white-space:nowrap}
+.account-list{display:grid;gap:10px;padding:14px}
+.account-card{padding:15px 16px;border:1px solid var(--line);border-radius:14px;background:#fff;transition:border .15s,box-shadow .15s}
+.account-card:hover{border-color:#d4d7e7;box-shadow:0 8px 20px #17203308}
+.account-identity{display:flex;align-items:center;gap:11px;min-width:0}
+.avatar{flex:none;width:38px;height:38px;display:grid;place-items:center;border-radius:12px;background:#e9edff;color:#4b4bd3;font-size:14px;font-weight:800}
+.owner-avatar{background:#27334d;color:#c7c6ff}
+.account-title{min-width:0;flex:1}
+.account-identity h3{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:0;font-size:13px;font-weight:750}
+.account-identity p{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:2px 0 0;color:var(--muted);font-size:10px}
+.status-badge{flex:none;border-radius:999px;padding:5px 8px;font-size:9px;font-weight:750}
+.admin-badge{background:#f0efff;color:#5851c9}
+.active-badge{background:var(--green-soft);color:#247b5f}
+.pending-badge{background:var(--amber-soft);color:#9b6417}
+.disabled-badge{background:var(--red-soft);color:#a3454d}
+.owner-note{display:flex;align-items:center;gap:10px;margin:13px 0 0 49px;padding:10px 12px;border-radius:10px;background:#f7f8fc}
+.owner-check{width:21px;height:21px;border-radius:7px;display:grid;place-items:center;background:#e3f4ed;color:#278363;font-size:12px}
+.owner-note strong,.owner-note small{display:block}
+.owner-note strong{font-size:10px}
+.owner-note small{margin-top:2px;color:var(--muted);font-size:9px}
+.account-summary{margin:11px 0 0 49px;color:#68758a;font-size:10px}
+.grant-dot{display:inline-block;width:7px;height:7px;margin-right:6px;border-radius:50%;background:#7c79ed}
+.access-details{margin-top:12px;border-top:1px solid #f0f1f5}
+.access-details summary{padding:11px 0 0;list-style:none;color:var(--accent);font-weight:750;font-size:10px;cursor:pointer}
+.access-details summary::-webkit-details-marker{display:none}
+.access-details summary:after{content:"＋";float:right;color:#8688d8;font-size:13px;line-height:1}
+.access-details[open] summary:after{content:"−"}
+.access-form{padding-top:14px}
+.status-field{max-width:250px}
+.status-field select{min-height:38px;font-size:11px}
+.access-form .site-grid{grid-template-columns:repeat(auto-fit,minmax(220px,1fr));max-height:300px}
+.form-footer{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:13px}
+.form-footer .field-hint{max-width:210px;margin:0}
+.empty-state{padding:38px 16px;text-align:center;color:var(--muted);font-size:12px}
+.empty-state strong{display:block;margin-bottom:5px;color:#39445a;font-size:13px}
+.notice{display:flex;align-items:center;gap:10px;margin:0 0 20px;padding:13px 16px;border:1px solid #cfecdd;border-radius:13px;background:#f0fbf5;color:#226b50}
+.notice p{margin:0;font-size:12px;font-weight:650}
+ .notice-icon{width:24px;height:24px;display:grid;place-items:center;border-radius:8px;background:#d9f2e4;color:#1c805b}
+.error-notice{border-color:#f3d1d4;background:#fff4f4;color:#9e3d49}.error-notice .notice-icon{background:#ffe0e2;color:#a6404c}
+.invite-card{display:flex;gap:17px;margin:0 0 22px;padding:21px;border:1px solid #dad9ff;border-radius:16px;background:linear-gradient(120deg,#f5f4ff,#fff 65%);box-shadow:0 12px 30px #514ddd0d}
+.invite-icon{flex:none;width:42px;height:42px;border-radius:13px;display:grid;place-items:center;background:#e6e4ff;color:#5553d7;font-size:20px}
+.invite-copy{min-width:0;flex:1}
+.invite-copy h2{margin:0;font-size:15px}
+.invite-copy>p:not(.eyebrow){margin:5px 0 12px;color:var(--muted);font-size:11px}
+.invite-link-row{display:flex;gap:8px}
+.invite-link-row input{min-width:0;font-size:10px}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+[hidden]{display:none!important}
+@media(max-width:1120px){.content-grid{grid-template-columns:minmax(270px,.8fr) minmax(0,1.2fr)}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.site-copy small{display:none}}
+@media(max-width:820px){.sidebar{position:static;width:auto;padding:12px 18px;display:block}.brand{padding:0}.brand-caption,.nav-label,.sidebar-bottom{display:none}.side-nav{display:flex;gap:4px;margin-top:13px;overflow:auto}.side-nav a{padding:8px 10px;font-size:11px;white-space:nowrap}.nav-icon{display:none}.main{margin:0;padding:24px 18px 48px}.topline{margin-bottom:23px}.hero{align-items:flex-start}.hero-policy{display:none}.create-panel{position:static}.content-grid{grid-template-columns:1fr}}
+@media(max-width:520px){.topline{align-items:flex-start}.secure-pill{font-size:0;padding:8px}.secure-dot{width:8px;height:8px}.hero{margin-bottom:20px}h1{font-size:29px}.hero-copy{font-size:12px}.stats{gap:8px}.stat-card{padding:13px}.stat-value{font-size:23px}.stat-caption{font-size:9px}.panel-heading{padding:18px}.create-form{padding:17px 18px 19px}.directory-toolbar{padding:12px;flex-wrap:wrap}.directory-toolbar .search-field{max-width:none;flex-basis:100%}.account-list{padding:10px}.account-card{padding:13px}.status-badge{font-size:8px;padding:5px 7px}.account-summary,.owner-note{margin-left:0}.form-footer{align-items:flex-start;flex-direction:column}.form-footer .primary-button{width:100%}.invite-card{padding:16px;gap:11px}.invite-icon{width:34px;height:34px}.invite-link-row{flex-direction:column}.invite-link-row .primary-button{width:100%}}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{scroll-behavior:auto!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="layout">
+<aside class="sidebar">
+  <div class="brand"><span class="brand-mark">A</span><span><span class="brand-name">Access Console</span><span class="brand-caption">единая точка управления</span></span></div>
+  <p class="nav-label">Рабочая область</p>
+  <nav class="side-nav" aria-label="Разделы панели">
+    <a class="active" href="#overview"><span class="nav-icon">◈</span>Обзор</a>
+    <a href="#new-user"><span class="nav-icon">＋</span>Новый пользователь</a>
+    <a href="#accounts"><span class="nav-icon">♙</span>Пользователи</a>
+  </nav>
+  <div class="sidebar-bottom">
+    <div class="admin-mini"><span class="avatar">__ADMIN_INITIAL__</span><span><strong>__ADMIN_NAME__</strong><small>Суперадминистратор</small></span></div>
+    <a class="logout" href="/logout?rd=https%3A%2F%2Fauth.bezrabotnyi.com%2Flogin">Выйти из панели</a>
+  </div>
+</aside>
+<main class="main" id="overview">
+  <div class="topline"><div class="breadcrumb"><span>Управление</span><span aria-hidden="true">/</span><strong>Доступ SSO</strong></div><div class="top-actions"><span class="secure-pill"><span class="secure-dot"></span>Защищённая сессия</span><a class="top-logout" href="/logout?rd=https%3A%2F%2Fauth.bezrabotnyi.com%2Flogin">Выйти</a></div></div>
+  <section class="hero"><div><p class="eyebrow">Администрирование SSO</p><h1>Пользователи и доступ</h1><p class="hero-copy">Создавайте учётные записи и решайте, к каким сайтам компании у них будет доступ.</p></div><div class="hero-policy"><strong>🔒 Доступ закрыт по умолчанию</strong><span>Каждое разрешение проверяется при входе на сайт.</span></div></section>
+  <section class="stats" aria-label="Сводка доступа">
+    <article class="stat-card"><div class="stat-top"><span>Пользователи</span><span class="stat-icon">♙</span></div><strong class="stat-value">__USER_COUNT__</strong><small class="stat-caption">обычные учётные записи</small></article>
+    <article class="stat-card"><div class="stat-top"><span>Активны</span><span class="stat-icon">✓</span></div><strong class="stat-value">__ACTIVE_COUNT__</strong><small class="stat-caption">могут войти в систему</small></article>
+    <article class="stat-card"><div class="stat-top"><span>Ожидают настройки</span><span class="stat-icon">…</span></div><strong class="stat-value">__PENDING_COUNT__</strong><small class="stat-caption">ещё не установили пароль</small></article>
+    <article class="stat-card"><div class="stat-top"><span>Сайты SSO</span><span class="stat-icon">◎</span></div><strong class="stat-value">__SITE_COUNT__</strong><small class="stat-caption">доступны для назначения</small></article>
+  </section>
+  __MESSAGE__
+  __INVITE__
+  <div class="content-grid">
+    <section class="panel create-panel" id="new-user">
+      <div class="panel-heading"><p class="eyebrow">Приглашение</p><h2>Добавить пользователя</h2><p>Пользователь сам задаст пароль по защищённой ссылке.</p></div>
+      <form method="post" action="/admin" class="create-form">
+        <input type="hidden" name="csrf" value="__CSRF__"><input type="hidden" name="csrf_cookie_name" value="__CSRF_NAME__"><input type="hidden" name="action" value="create">
+        <div class="form-fields"><label class="text-field"><span>Логин</span><input name="username" required maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" autocomplete="off" placeholder="например, oleg.petrov"></label>
+        <label class="text-field"><span>Имя пользователя</span><input name="display_name" required maxlength="100" placeholder="Олег Петров"></label></div>
+        <fieldset class="site-fieldset"><legend>Разрешённые сайты</legend><div class="fieldset-label"><small>Можно выбрать несколько</small></div>__OPTIONS__</fieldset>
+        <button class="primary-button create-submit" type="submit">Создать и получить ссылку</button>
+      </form>
+    </section>
+    <section class="panel directory-panel" id="accounts">
+      <div class="panel-heading"><p class="eyebrow">Каталог доступа</p><h2>Учётные записи</h2><p>Состояние пользователей и назначенные сайты.</p></div>
+      <div class="directory-toolbar"><label class="search-field"><span class="sr-only">Найти пользователя</span><input type="search" id="user-search" placeholder="Найти по имени или логину" autocomplete="off"></label><span class="directory-count"><strong>__USER_COUNT__</strong> пользователей</span></div>
+      <div class="account-list" id="account-list">__CARDS__<div class="empty-state" id="empty-state" hidden><strong>Ничего не найдено</strong>Измените запрос или очистите поиск.</div></div>
+    </section>
+  </div>
+</main>
+</div>
+<script nonce="__NONCE__">
+for(const picker of document.querySelectorAll("[data-site-picker]")){
+  const search=picker.querySelector("[data-site-search]");
+  const items=[...picker.querySelectorAll("[data-site-option]")];
+  const count=picker.querySelector("[data-selected-count]");
+  const update=()=>{
+    const term=(search.value||"").trim().toLocaleLowerCase();
+    for(const item of items)item.hidden=!item.dataset.siteName.includes(term);
+    count.textContent=picker.querySelectorAll("input[name=sites]:checked").length+" выбрано";
+  };
+  search.addEventListener("input",update);
+  picker.querySelector("[data-site-all]").addEventListener("click",()=>{for(const item of items)item.querySelector("input").checked=true;update()});
+  picker.querySelector("[data-site-clear]").addEventListener("click",()=>{for(const item of items)item.querySelector("input").checked=false;update()});
+  picker.addEventListener("change",update);
+}
+const userSearch=document.getElementById("user-search");
+const accounts=[...document.querySelectorAll("[data-account-card]")];
+const emptyState=document.getElementById("empty-state");
+const updateAccounts=()=>{
+  const term=(userSearch.value||"").trim().toLocaleLowerCase();
+  let visible=0;
+  for(const account of accounts){const show=account.dataset.accountSearch.includes(term);account.hidden=!show;if(show)visible++}
+  emptyState.hidden=visible>0;
+};
+userSearch.addEventListener("input",updateAccounts);
+const copyButton=document.getElementById("copy-link");
+if(copyButton)copyButton.addEventListener("click",async()=>{
+  const input=document.getElementById("invite-link");
+  try{await navigator.clipboard.writeText(input.value);copyButton.textContent="Ссылка скопирована"}
+  catch(error){input.focus();input.select();document.execCommand("copy");copyButton.textContent="Ссылка скопирована"}
+});
+</script>
+</body>
+</html>"""
+        page = (
+            page.replace("__ADMIN_INITIAL__", html.escape(admin[:1].upper()))
+            .replace("__ADMIN_NAME__", html.escape(admin))
+            .replace("__USER_COUNT__", str(len(managed_users)))
+            .replace("__ACTIVE_COUNT__", str(active_count))
+            .replace("__PENDING_COUNT__", str(pending_count))
+            .replace("__SITE_COUNT__", str(len(sites)))
+            .replace("__MESSAGE__", message_html)
+            .replace("__INVITE__", invite_html)
+            .replace("__CSRF__", csrf)
+            .replace("__CSRF_NAME__", csrf_name)
+            .replace("__NONCE__", nonce)
+            .replace("__OPTIONS__", site_picker())
+            .replace("__CARDS__", "".join(cards) or '<div class="empty-state"><strong>Пока нет пользователей</strong>Создайте первую учётную запись в форме слева.</div>')
         )
-        self._send_html(body, csrf=csrf, nonce=nonce, csrf_cookie_name=csrf_name, status=status)
+        self._send_html(page, csrf=csrf, nonce=nonce, csrf_cookie_name=csrf_name, status=status)
 
     def _invite_page(
         self, message: str = "", success: bool = False, status: int = 200, token: str = ""
