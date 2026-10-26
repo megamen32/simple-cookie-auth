@@ -34,6 +34,11 @@ MAX_JSON_BODY = 64 * 1024
 DEFAULT_REDIRECT = os.environ.get(
     "GPTADMIN_COOKIE_AUTH_DEFAULT_REDIRECT", "https://bezrabotnyi.com/"
 )
+LOGIN_FRAGMENT_SCRIPT = """function redirectWithLoginFragment(target) {
+  const destination = new URL(target, location.href);
+  if (!destination.href.includes('#') && location.hash) destination.hash = location.hash;
+  return destination.href;
+}"""
 ACCESS_DB = os.environ.get(
     "GPTADMIN_COOKIE_AUTH_ACCESS_DB", "/var/lib/gptadmin-cookie-auth/access.sqlite3"
 )
@@ -850,7 +855,7 @@ async function loginWithPasskey(){
       headers:{'Content-Type':'application/json','X-CSRF-Token':CSRF,'X-CSRF-Cookie-Name':CSRF_COOKIE_NAME},
       body:JSON.stringify({credential:credentialToJSON(credential)})});
     if(!result.ok)throw new Error('Не удалось войти по ключу');
-    location.href=REDIRECT;
+    location.href=redirectWithLoginFragment(REDIRECT);
   }catch(e){status.textContent=e.message||'Не удалось войти по ключу';button.disabled=false;}
 }
 """ if enabled else ""
@@ -897,6 +902,7 @@ a{{color:#aaa;text-decoration:none}}a:hover{{color:#ddd;text-decoration:underlin
 <small>После входа вы останетесь авторизованы на сайтах *.bezrabotnyi.com.</small></main>
 <script nonce=\"{nonce}\">
 const CSRF={json.dumps(csrf)}, CSRF_COOKIE_NAME={json.dumps(csrf_cookie_name)}, REDIRECT={redirect_json};
+{LOGIN_FRAGMENT_SCRIPT}
 const loginForm=document.querySelector('.login-form');
 if(loginForm)loginForm.addEventListener('submit',async e=>{{
   e.preventDefault();
@@ -913,7 +919,7 @@ if(loginForm)loginForm.addEventListener('submit',async e=>{{
       status.textContent=response.status===401?'Неверный логин или пароль.':'Не удалось выполнить вход. Обновите страницу.';
       return;
     }}
-    location.assign(result.redirect);
+    location.assign(redirectWithLoginFragment(result.redirect));
   }}catch(e){{status.textContent='Не удалось выполнить вход. Проверьте соединение.';}}
   finally{{submit.disabled=false;}}
 }});
@@ -980,7 +986,7 @@ const addLink=document.querySelector('.access-link a');if(addLink)addLink.addEve
       headers:{{'Content-Type':'application/json','X-CSRF-Token':CSRF,'X-CSRF-Cookie-Name':CSRF_COOKIE_NAME}},
       body:JSON.stringify({{credential:registrationToJSON(credential)}})}});
     if(!finish.ok)throw new Error('Не удалось добавить ключ');
-    password.value='';status.textContent='Ключ добавлен';location.assign(REDIRECT);
+    password.value='';status.textContent='Ключ добавлен';location.assign(redirectWithLoginFragment(REDIRECT));
   }}catch(error){{
     if(error&&error.name==='NotAllowedError'){{
       pendingRegistrationOptions=null;addLink.textContent='Добавить ключ входа';
