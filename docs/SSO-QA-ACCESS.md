@@ -13,18 +13,31 @@ SSO-доступа, что у администратора, включая вс�
 он получает секрет только через stdin, заполняет форму через поддерживаемый
 `agent-browser eval --stdin` и не отправляет её.
 
-На server-100 выберите собственные короткие session/namespace. Пример для
-новой собственной браузерной сессии; сохраняйте одинаковые параметры во всех
-вызовах:
+На server-100 выберите собственные короткие session/namespace. Для одной
+сессии используйте функцию ниже во всех вызовах `agent-browser`; она сохраняет
+одинаковые session, namespace и `--idle-timeout`. Тот же timeout явно передаётся
+потребителю секрета, чтобы его `eval` не переоткрывал daemon с другой настройкой:
 
 ```sh
-agent-browser --session qa-sso --namespace qa-sso --auto-connect false --headed false --idle-timeout 300000 open 'https://auth.bezrabotnyi.com/login?rd=https%3A%2F%2Fagent.bezrabotnyi.com%2F'
-agent-browser --session qa-sso --namespace qa-sso --auto-connect false --headed false --idle-timeout 300000 snapshot -i
-sss-run sso.qa.admin-equivalent -- /home/roomhacker/simple-cookie-auth/scripts/sso-qa-fill.py --session qa-sso --namespace qa-sso
+SQA_SESSION=qa-sso
+SQA_NAMESPACE=qa-sso
+SQA_IDLE_TIMEOUT=300000
+ssoqa_browser() {
+  /home/roomhacker/.npm-global/bin/agent-browser \
+    --session "$SQA_SESSION" --namespace "$SQA_NAMESPACE" \
+    --auto-connect false --headed false --idle-timeout "$SQA_IDLE_TIMEOUT" "$@"
+}
+
+ssoqa_browser open 'https://auth.bezrabotnyi.com/login?rd=https%3A%2F%2Fagent.bezrabotnyi.com%2F'
+ssoqa_browser snapshot -i
+sss-run sso.qa.admin-equivalent -- /home/roomhacker/simple-cookie-auth/scripts/sso-qa-fill.py \
+  --session "$SQA_SESSION" --namespace "$SQA_NAMESPACE" --idle-timeout "$SQA_IDLE_TIMEOUT"
 ```
 
 Нажмите «Войти паролем» **один раз** через актуальный ref из snapshot. Затем
-читайте URL и snapshot до завершения перехода: краткое состояние disabled
+используйте `ssoqa_browser click <актуальный-ref>`, затем
+`ssoqa_browser get url` и `ssoqa_browser snapshot -i` до завершения перехода:
+краткое состояние disabled
 после нажатия означает ожидание, а не отказ. Успех — реальная защищённая
 страница приложения, а не только исчезновение формы. Не выводите cookies,
 значения password-полей или URL с возможным секретным fragment. При ошибке
@@ -33,8 +46,12 @@ sss-run sso.qa.admin-equivalent -- /home/roomhacker/simple-cookie-auth/scripts/s
 только собственную сессию:
 
 ```sh
-agent-browser --session qa-sso --namespace qa-sso --auto-connect false --headed false --idle-timeout 300000 close
+ssoqa_browser close
 ```
+
+Не повторяйте `sss-run` после подтверждённого входа или при неизвестном исходе;
+сначала прочитайте текущее состояние той же сессии. При начале нового QA-сеанса
+снова задайте session/namespace и используйте ту же функцию до `close`.
 
 Другой разрешённый сайт можно указать в `rd`; потребитель принимает только
 настоящую форму `/login` на `https://auth.bezrabotnyi.com`. Недоступный GPTAdmin
