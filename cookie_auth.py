@@ -254,7 +254,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _security_headers(self, nonce: str | None = None) -> None:
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Referrer-Policy", "no-referrer")
+        # same-origin, а НЕ no-referrer: браузер при no-referrer обнуляет
+        # Origin у классической навигационной POST-формы (Fetch: origin
+        # навигации берётся из referrer'а, при no-referrer он opaque → null).
+        # Тогда /invite и /admin отбивали бы форму заголовком
+        # {"error":"request rejected"} — установка пароля и управление
+        # доступом в браузере были невозможны. same-origin не утекает
+        # referrer на другие сайты (CSP здесь и так default-src 'none'),
+        # но Origin остаётся настоящим и проверка CSRF работает.
+        self.send_header("Referrer-Policy", "same-origin")
         self.send_header("X-Frame-Options", "DENY")
         if nonce:
             self.send_header(

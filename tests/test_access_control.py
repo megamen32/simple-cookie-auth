@@ -177,6 +177,45 @@ class AccessControlHttpTests(unittest.TestCase):
         }, setup_form)
         self.assertEqual(410, status)
 
+    def test_referrer_policy_keeps_browser_origin_intact(self):
+        # Браузер берёт Origin классической POST-формы из referrer'а страницы:
+        # при Referrer-Policy: no-referrer он шлёт Origin: null, и формы
+        # /invite и /admin отбивались 403 {"error":"request rejected"}.
+        # Политика должна быть same-origin: referrer наружу не уходит,
+        # а Origin остаётся настоящим.
+        owner_cookie = "gptadmin_auth=" + cookie_auth.make_token("owner")
+        for path, headers in (
+            ("/invite", {}),
+            ("/login", {}),
+            ("/admin", {"Cookie": owner_cookie}),
+        ):
+            status, response_headers, _ = self.request("GET", path, headers)
+            self.assertEqual(200, status, path)
+            self.assertEqual(
+                "same-origin",
+                response_headers.get("Referrer-Policy"),
+                f"{path}: Referrer-Policy обнуляет Origin у форм",
+            )
+
+    def test_cross_origin_form_post_is_still_rejected(self):
+        # Смена политики referrer не должна ослаблять CSRF: чужой Origin —
+        # отказ, даже при верном CSRF-токене.
+        status, headers, body = self.request("GET", "/invite")
+        self.assertEqual(200, status)
+        csrf_name, csrf = self.csrf_from(headers, body)
+        form = urlencode([
+            ("token", "irrelevant"), ("password", "long unique password"),
+            ("password_confirm", "long unique password"),
+            ("csrf", csrf), ("csrf_cookie_name", csrf_name),
+        ])
+        status, _, body = self.request("POST", "/invite", {
+            "Cookie": csrf_name + "=" + csrf,
+            "Origin": "https://evil.example.com",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }, form)
+        self.assertEqual(403, status)
+        self.assertIn("request rejected", body)
+
 
 if __name__ == "__main__":
     unittest.main()
